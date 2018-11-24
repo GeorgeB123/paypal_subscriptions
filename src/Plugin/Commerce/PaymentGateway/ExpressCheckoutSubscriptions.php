@@ -45,7 +45,6 @@ class ExpressCheckoutSubscriptions extends ExpressCheckout {
         'Year' => $this->t('Year'),
       ],
     ];
-
     return $form;
   }
 
@@ -76,29 +75,18 @@ class ExpressCheckoutSubscriptions extends ExpressCheckout {
    */
   public function setExpressCheckout(PaymentInterface $payment, array $extra) {
     $order = $payment->getOrder();
-
     $amount = $this->rounder->round($payment->getAmount());
-
     // Build a name-value pair array for this transaction.
     $nvp_data = [
       'METHOD' => 'SetExpressCheckout',
-
       // Default the Express Checkout landing page to the Mark solution.
-      'SOLUTIONTYPE' => 'Mark',
-      'LANDINGPAGE' => 'Login',
-
-      // Disable entering notes in PayPal, we don't have any way to accommodate
-      // them right now.
-      'ALLOWNOTE' => '0',
-
-      'AMT' => $amount->getNumber(),
-      'CURRENCYCODE' => $amount->getCurrencyCode(),
-      'PAYMENTACTION' => 'Sale',
-      'INVNUM' => $order->id(),
-
+      'VERSION' => '124.0',
+      'PAYMENTREQUEST_0_PAYMENTACTION'=> 'Sale',
+      'PAYMENTREQUEST_0_AMT' => $amount->getNumber(),
+      'PAYMENTREQUEST_0_CURRENCYCODE' => $amount->getCurrencyCode(),
+      'PAYMENTREQUEST_0_DESC' => 'test EC payment',
       'L_BILLINGTYPE0' => 'RecurringPayments',
       'L_BILLINGAGREEMENTDESCRIPTION0' => 'Subscription',
-
       // Set the return and cancel URLs.
       'RETURNURL' => $extra['return_url'],
       'CANCELURL' => $extra['cancel_url'],
@@ -111,7 +99,6 @@ class ExpressCheckoutSubscriptions extends ExpressCheckout {
     if (!empty($order->getEmail())) {
       $nvp_data['PAYMENTREQUEST_0_EMAIL'] = $order->getEmail();
     }
-
     // Make the PayPal NVP API request.
     return $this->doRequest($nvp_data, $order);
   }
@@ -121,17 +108,14 @@ class ExpressCheckoutSubscriptions extends ExpressCheckout {
    */
   public function getExpressCheckoutDetails(OrderInterface $order) {
     // Get the Express Checkout order token.
-    $order_express_checkout_data = $order->getData('paypal_express_checkout_recurring');
-
+    $order_express_checkout_data = $order->getData('paypal_express_checkout');
     // Build a name-value pair array to obtain buyer information from PayPal.
     $nvp_data = [
       'METHOD' => 'GetExpressCheckoutDetails',
       'TOKEN' => $order_express_checkout_data['token'],
     ];
-
     // Make the PayPal NVP API request.
     return $this->doRequest($nvp_data, $order);
-
   }
 
   /**
@@ -139,65 +123,60 @@ class ExpressCheckoutSubscriptions extends ExpressCheckout {
    */
   public function doExpressCheckoutDetails(OrderInterface $order) {
     // Build NVP data for PayPal API request.
-    $order_express_checkout_data = $order->getData('paypal_express_checkout_recurring');
-    $amount = $this->rounder->round($order->getTotalPrice());
-    $configuration = $this->getConfiguration();
-
+     $account = \Drupal\user\Entity\User::load(\Drupal::currentUser()->id());
+     $order_express_checkout_data = $order->getData('paypal_express_checkout');
+     $amount = $this->rounder->round($order->getTotalPrice());
+     $configuration = $this->getConfiguration();
     $nvp_data = [
       'METHOD' => 'CreateRecurringPaymentsProfile',
+      'SUBSCRIBERNAME' =>$account->get('name')->value,
+      'PROFILEREFERENCE' =>$order->getOrderNumber(),
+      'AUTOBILLOUTAMT' => 'AddToNextBilling',
+      'PAYERSTATUS' => 'verified',
       'TOKEN' => $order_express_checkout_data['token'],
       'PAYERID' => $order_express_checkout_data['payerid'],
-      "PROFILESTARTDATE" => date("Y-m-d\TH:i:s\Z"),
-      "DESC" => "Subscription",
-      "BILLINGPERIOD" => $configuration['billing_period'],
-      "BILLINGFREQUENCY" => "1",
-      "AMT" => $amount->getNumber(),
-      "CURRENCYCODE" => $amount->getCurrencyCode(),
+      'PROFILESTARTDATE' => date("Y-m-d\TH:i:s\Z"),
+      'DESC' => 'Subscription',
+      'BILLINGPERIOD' => $configuration['billing_period'],
+      'BILLINGFREQUENCY' => '1',
+      'AMT' => $amount->getNumber(),
+      'CURRENCYCODE' => $amount->getCurrencyCode(),
     ];
-
     // Make the PayPal NVP API request.
     return $this->doRequest($nvp_data, $order);
-
   }
 
   /**
    * {@inheritdoc}
    */
   public function onReturn(OrderInterface $order, Request $request) {
-    $order_express_checkout_data = $order->getData('paypal_express_checkout_recurring');
+    $order_express_checkout_data = $order->getData('paypal_express_checkout');
     if (empty($order_express_checkout_data['token'])) {
       throw new PaymentGatewayException('Token data missing for this PayPal Express Checkout transaction.');
     }
-
     // GetExpressCheckoutDetails API Operation (NVP).
     // Shows information about an Express Checkout transaction.
     $paypal_response = $this->getExpressCheckoutDetails($order);
-
     // If the request failed, exit now with a failure message.
     if ($paypal_response['ACK'] == 'Failure') {
       throw new PaymentGatewayException($paypal_response['PAYMENTREQUESTINFO_0_LONGMESSAGE'], $paypal_response['PAYMENTREQUESTINFO_n_ERRORCODE']);
     }
-
     // Set the Payer ID used to finalize payment.
     $order_express_checkout_data['payerid'] = $paypal_response['PAYERID'];
     $order->setData('paypal_express_checkout_recurring', $order_express_checkout_data);
-
     // If the user is anonymous, add their PayPal e-mail to the order.
     if (empty($order->mail)) {
       $order->setEmail($paypal_response['EMAIL']);
     }
     $order->save();
-
     // DoExpressCheckoutPayment API Operation (NVP).
     // Completes an Express Checkout transaction.
     $paypal_response = $this->doExpressCheckoutDetails($order);
-
     // Nothing to do for failures for now - no payment saved.
     // @todo - more about the failures.
     if ($paypal_response['PROFILESTATUS'] !== 'ActiveProfile') {
       throw new PaymentGatewayException($paypal_response['PAYMENTINFO_0_LONGMESSAGE'], $paypal_response['PAYMENTINFO_0_ERRORCODE']);
     }
-
     $payment_storage = $this->entityTypeManager->getStorage('commerce_payment');
     $payment = $payment_storage->create([
       'state' => 'authorization',
